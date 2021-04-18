@@ -11,6 +11,10 @@ const mongoose = require("mongoose");
 const session = require("express-session");
 const passport = require("passport");
 const passportLocalMongoose = require("passport-local-mongoose");
+const GoogleStrategy = require("passport-google-oauth20").Strategy;
+
+//this is to make the findOrCreate function work without having to implement it
+const findOrCreate = require("mongoose-findorcreate");
 
 const app = express();
 
@@ -36,11 +40,15 @@ mongoose.set("useCreateIndex", true);
 
 const userSchema = new mongoose.Schema({
   email: String,
-  password: String
+  password: String,
+  googleId: String,
+  secret: String
 });
 
 //add the passport local mongoose plugin to userSchema
 userSchema.plugin(passportLocalMongoose);
+//add the findOrCreate plugin
+userSchema.plugin(findOrCreate);
 
 //encrypt using the secret string and mongoose-encryption package. encrypt only the password
 //the password will be encrypted when you call save and decrypted when you call find
@@ -51,11 +59,70 @@ const User = new mongoose.model("User", userSchema);
 
 //passport local configuration. 1. create strategy 2. serialize 3. deserialize
 passport.use(User.createStrategy());
-passport.serializeUser(User.serializeUser());
-passport.deserializeUser(User.deserializeUser());
+passport.serializeUser(function(user, done) {
+  done(null, user.id);
+});
+
+passport.deserializeUser(function(id, done) {
+  User.findById(id, function(err, user) {
+    done(err, user);
+  });
+});
+
+
+//from passport-google-oauth documentation //// use google passport Strategy
+passport.use(new GoogleStrategy({
+    clientID: process.env.CLIENT_ID,
+    clientSecret: process.env.CLIENT_SECRET,
+    callbackURL: "http://localhost:3000/auth/google/secrets",
+    userProfileURL: "https://www.googleapis.com/oauth2/v3/userinfo"
+  },
+  function(accessToken, refreshToken, profile, cb) {
+    User.findOrCreate({ googleId: profile.id }, function (err, user) {
+      return cb(err, user);
+    });
+  }
+));
 
 app.get("/", function(req, res) {
   res.render("home");
+});
+
+
+//the route for when a user clicks on the login with google button
+app.get("/auth/google",
+  //authenticate the user with google strategy
+  passport.authenticate("google", {scope : ["profile"]})
+);
+
+//redirecting the user back to the website after they login using gmail
+app.get("/auth/google/secrets",
+  passport.authenticate("google", { failureRedirect: '/login' }),
+  function(req, res) {
+    // Successful authentication, redirect to secrets page.
+    res.redirect("/secrets");
+  });
+
+//submit page
+app.get("/submit", function(req, res){
+  if(req.isAuthenticated()) {
+    res.render("submit");
+  } else {
+    res.redirect("/login");
+  }
+});
+
+//secrets page
+app.get("/secrets", function(req, res){
+  User.find({"secret": {$ne : null}}, function(err, foundUsers){
+    if (err){
+      console.log(err);
+    } else {
+      if(foundUsers){
+        res.render("secrets", {usersWithSecrets: foundUsers});
+      }
+    }
+  })
 });
 
 app.get("/login", function(req, res) {
@@ -122,6 +189,29 @@ app.post("/login", function(req, res){
       passport.authenticate("local")(req, res, function(){
         res.redirect("/secrets");
       });
+    }
+  });
+
+});
+
+
+//ADD NEW SECRET
+app.post("/submit", function(req, res){
+  const submittedSecret = req.body.secret;
+
+  //find the current user and save the secret to their file
+  console.log(req.user.id);
+
+  User.findById(req.user.id, function(err, foundUser) {
+    if(err){
+      console.log(err);
+    } else {
+      if(foundUser) {
+        foundUser.secret = submittedSecret;
+        foundUser.save(function() {
+          res.redirect("/secrets");
+        });
+      }
     }
   });
 
